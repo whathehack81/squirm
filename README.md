@@ -44,7 +44,7 @@ text
 
 **Usage:**
 \`\`\`bash
-./squirm.sh -t playtika.com        # full pipeline
+./squirm.sh -t target.com        # full pipeline
 ./squirm.sh -t target.com --fast   # skip endpoints
 \`\`\`
 
