@@ -49,3 +49,4 @@ text
 \`\`\`
 
 **Deps:** \`subfinder httpx-toolkit gau jq brain.sh\`
+I will be releasing the newer versions as I work out edge cases and tweak modules and math in py. My venv is suitable, I am now running a completely diff work stack. I am realizing that, even if you think 🤔 you have a full stack and a clean setup. it's wize to regularly do system updates and maintenance.I am very thankful to GitHub for letting me do all of these things, together with Kali Linux.
