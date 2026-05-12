@@ -2,3 +2,4 @@ intel/
 *.bak
 *.bak.*
 scope.txt
+findings/
