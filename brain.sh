@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -euo pipefail
+
 TARGET="${1:-}"
 BASE_DIR="${2:-intel}"
 INPUT="$BASE_DIR/$TARGET/endpoints.txt"
@@ -31,7 +33,7 @@ debug_log() {
   fi
 }
 
-echo -e "${GREEN}[+] Squirm Brain v3.1 - $TARGET${NC}"
+echo -e "${GREEN}[+] Squirm Brain v3.2 - $TARGET${NC}"
 
 # Load custom config if exists
 declare -A KEYWORD_SCORES
@@ -258,7 +260,7 @@ classify() {
 
   # API versioning / internal APIs
   case "$ep_normalized" in
-    */api/v[0-9]*)
+    */api/v[0-9]*/*|*/api/v[0-9]*)
       # Version-specific endpoints worth investigating
       debug_log "Classified as: versioned-api (depth bonus)"
       local score=$((65 + (depth * 2)))
@@ -305,7 +307,7 @@ skipped_count=0
 processed_count=0
 
 while IFS= read -r line; do
-  ((line_count++)) || true  # Fix: prevent exit on ((expr == 0))
+  ((++line_count))
   
   # Skip empty lines and comments
   [[ -z "$line" || "$line" =~ ^[[:space:]]*$ ]] && continue
@@ -317,7 +319,7 @@ while IFS= read -r line; do
   
   # Validate endpoint
   if [[ ${#ep} -lt 2 ]]; then
-    ((skipped_count++)) || true
+    ((++skipped_count))
     debug_log "Skipped invalid endpoint: $line"
     continue
   fi
@@ -329,7 +331,7 @@ while IFS= read -r line; do
   matched_rule=$(echo "$result" | cut -d'|' -f4)
   
   RESULTS+=("$score|$category|$method|$ep|$reason|$matched_rule")
-  ((processed_count++)) || true
+  ((++processed_count))
   
 done < <(sort -u "$INPUT")
 
