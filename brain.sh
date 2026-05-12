@@ -1,7 +1,5 @@
 #!/bin/bash
 
-set -euo pipefail
-
 TARGET="${1:-}"
 BASE_DIR="${2:-intel}"
 INPUT="$BASE_DIR/$TARGET/endpoints.txt"
@@ -33,7 +31,7 @@ debug_log() {
   fi
 }
 
-echo -e "${GREEN}[+] Squirm Brain v3.0 - $TARGET${NC}"
+echo -e "${GREEN}[+] Squirm Brain v3.1 - $TARGET${NC}"
 
 # Load custom config if exists
 declare -A KEYWORD_SCORES
@@ -65,13 +63,21 @@ extract_method() {
   fi
 }
 
-# Extract path from endpoint string
+# Extract path from endpoint string (preserves query parameters for pattern matching)
 extract_path() {
   local ep="$1"
-  # Remove method if present
-  ep=$(echo "$ep" | sed 's/^(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\ //')
-  # Remove query parameters and fragments
-  ep=$(echo "$ep" | cut -d'?' -f1 | cut -d'#' -f1)
+  # Remove method if present (using sed -E for extended regex)
+  ep=$(echo "$ep" | sed -E 's/^(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\ //')
+  # Remove fragments but keep query params for SSRF/injection detection
+  ep=$(echo "$ep" | cut -d'#' -f1)
+  echo "$ep"
+}
+
+# Extract clean path (without query params) for depth calculation
+extract_clean_path() {
+  local ep="$1"
+  # Remove query parameters
+  ep=$(echo "$ep" | cut -d'?' -f1)
   echo "$ep"
 }
 
@@ -111,156 +117,154 @@ classify() {
   # Validate input
   if [[ ${#ep} -gt 2000 ]]; then
     debug_log "URL too long (>2000 chars), skipping: ${ep:0:50}..."
-    echo "error|0|url-too-long"
+    echo "error|0|url-too-long|length>2000"
     return
   fi
 
   # Check whitelist first
   if is_whitelisted "$ep"; then
     debug_log "Endpoint whitelisted: $ep"
-    echo "whitelisted|0|known-safe"
+    echo "whitelisted|0|known-safe|whitelisted"
     return
   fi
 
   # Check blacklist
   if is_blacklisted "$ep"; then
     debug_log "Endpoint blacklisted: $ep"
-    echo "blacklisted|95|known-dangerous"
+    echo "blacklisted|95|known-dangerous|blacklisted"
     return
   fi
 
-  # Normalize
-  ep=$(echo "$ep" | tr '[:upper:]' '[:lower:]')
+  # Normalize for pattern matching
+  local ep_normalized=$(echo "$ep" | tr '[:upper:]' '[:lower:]')
+  local clean_path=$(extract_clean_path "$ep")
+  local depth=$(calculate_depth "$clean_path")
 
-  local path=$(extract_path "$ep")
-  local depth=$(calculate_depth "$path")
-
-  debug_log "Processing: $path (method: $method, depth: $depth)"
+  debug_log "Processing: $clean_path (method: $method, depth: $depth)"
 
   ## 1. HARD NOISE
-  case "$ep" in
+  case "$ep_normalized" in
     *pr-news*|*blog*|*press*|*news*|*marketing*|*campaign*|*newsletter*|*branding*)
       debug_log "Classified as: marketing noise"
-      echo "noise|0|marketing-content"
+      echo "noise|0|marketing-content|marketing-keyword"
       return
       ;;
   esac
 
   ## 2. STATIC ASSETS
-  case "$ep" in
+  case "$ep_normalized" in
     *.png|*.jpg|*.jpeg|*.gif|*.css|*.js|*.svg|*.ico|*.woff|*.ttf|*.woff2|*.eot|*.webp|*.mp4|*.webm|*.pdf)
       debug_log "Classified as: static asset"
-      echo "static|5|asset-file"
+      echo "static|5|asset-file|file-extension"
       return
       ;;
   esac
 
   ## 3. CRITICAL SURFACES (highest priority)
+  ## NOTE: Check BEFORE stripping query params to catch SSRF/injection patterns
 
-  # SSRF / callbacks / redirects
-  case "$ep" in
+  # SSRF / callbacks / redirects (MUST check on full ep with params)
+  case "$ep_normalized" in
     *url=*|*uri=*|*redirect=*|*callback=*|*returnurl=*|*return_url=*|*target=*|*dest=*)
-      debug_log "Classified as: SSRF/callback"
-      echo "ssrf|90|user-controlled-callback"
+      debug_log "Classified as: SSRF/callback - matched in full endpoint"
+      echo "ssrf|90|user-controlled-callback|query-param-url"
+      return
+      ;;
+  esac
+
+  # SQL/NoSQL injection patterns (MUST check on full ep with params)
+  case "$ep_normalized" in
+    *query=*|*search=*|*filter=*|*where=*|*sql=*|*db=*|*mongo=*|*sql_*|*q=*|*s=*)
+      debug_log "Classified as: injection-prone - matched in full endpoint"
+      echo "injection|82|injection-vector|query-param-injection"
       return
       ;;
   esac
 
   # File interaction
-  case "$ep" in
+  case "$ep_normalized" in
     *file=*|*path=*|*download=*|*upload=*|*filename=*|*filepath=*|*/upload*|*/download*)
       # Avoid false positives
-      if [[ ! "$ep" =~ .*downloadable_content.* ]]; then
+      if [[ ! "$ep_normalized" =~ .*downloadable_content.* ]]; then
         debug_log "Classified as: file interaction"
-        echo "file|88|file-interaction"
+        echo "file|88|file-interaction|file-keyword"
         return
       fi
       ;;
   esac
 
   # Actuator / internal config / Spring Boot specific
-  case "$ep" in
+  case "$ep_normalized" in
     *actuator*|*/env*|*/heapdump*|*/jolokia*|*/metrics*|*/health*|*/prometheus*|*/.env*|*/config*)
       # Exclude false positives
-      if [[ ! "$ep" =~ .*environment_config_info.* ]]; then
+      if [[ ! "$ep_normalized" =~ .*environment_config_info.* ]]; then
         debug_log "Classified as: internal config exposure"
-        echo "config|92|internal-config-exposure"
+        echo "config|92|internal-config-exposure|actuator-keyword"
         return
       fi
       ;;
   esac
 
   # Financial / payment flow
-  case "$ep" in
+  case "$ep_normalized" in
     *payment*|*billing*|*checkout*|*cart*|*transaction*|*invoice*|*refund*|*subscription*|*/pay*)
       debug_log "Classified as: financial"
-      echo "financial|85|money-flow"
+      echo "financial|85|money-flow|financial-keyword"
       return
       ;;
   esac
 
   # Admin / internal / management
-  case "$ep" in
+  case "$ep_normalized" in
     */admin*|*/internal*|*/manage*|*/dashboard*|*/control*|*/panel*)
       # Exclude false positives like /contact or /admin-resources/public
-      if [[ ! "$ep" =~ .*public.* ]] && [[ ! "$ep" =~ .*contact.* ]]; then
+      if [[ ! "$ep_normalized" =~ .*public.* ]] && [[ ! "$ep_normalized" =~ .*contact.* ]]; then
         debug_log "Classified as: admin/privileged"
-        echo "admin|80|privileged-surface"
+        echo "admin|80|privileged-surface|admin-keyword"
         return
       fi
       ;;
   esac
 
   # Authentication / authorization
-  case "$ep" in
+  case "$ep_normalized" in
     *oauth*|*openid*|*/token*|*/auth*|*/login*|*/signin*|*/register*|*/sso*|*/saml*)
       debug_log "Classified as: authentication"
-      echo "auth|75|authentication"
+      echo "auth|75|authentication|auth-keyword"
       return
       ;;
   esac
 
   # IDOR patterns (object-level access)
-  case "$ep" in
+  case "$ep_normalized" in
     */user/*|*/account/*|*/profile/*|*/order/*|*/invoice/*|*/document/*|*/report/*|*/team/*|*/group/*|*/org/*)
       debug_log "Classified as: IDOR/object-access"
-      echo "idor|70|object-access"
+      echo "idor|70|object-access|idor-path-pattern"
       return
       ;;
   esac
 
   # Debug/dev/staging (with better context)
-  case "$ep" in
+  case "$ep_normalized" in
     */debug*|*/test/*|*_test_*|*/dev/*|*/staging*|*/qa/*|*test-data*|*test-fixture*)
       # More specific than just "test" in the name
-      if [[ "$path" =~ /test/ ]] || [[ "$path" =~ _test_ ]] || [[ "$path" =~ /dev/ ]]; then
+      if [[ "$clean_path" =~ /test/ ]] || [[ "$clean_path" =~ _test_ ]] || [[ "$clean_path" =~ /dev/ ]]; then
         debug_log "Classified as: non-production"
-        echo "debug|60|non-prod-surface"
+        echo "debug|60|non-prod-surface|debug-keyword"
         return
       fi
-      ;;
-  esac
-
-  # SQL/NoSQL injection patterns
-  case "$ep" in
-    *query=*|*search=*|*filter=*|*where=*|*sql=*|*db=*|*mongo=*|*sql_*)
-      debug_log "Classified as: injection-prone"
-      echo "injection|82|injection-vector"
-      return
       ;;
   esac
 
   # API versioning / internal APIs
-  case "$ep" in
-    */api/v[0-9]*/*|*/internal*|*/private*)
+  case "$ep_normalized" in
+    */api/v[0-9]*)
       # Version-specific endpoints worth investigating
-      if [[ "$path" =~ /api/v[0-9]+ ]]; then
-        debug_log "Classified as: versioned-api (depth bonus)"
-        local score=$((65 + (depth * 2)))
-        [[ $score -gt 80 ]] && score=80
-        echo "$score|versioned-api|version-specific-endpoint"
-        return
-      fi
+      debug_log "Classified as: versioned-api (depth bonus)"
+      local score=$((65 + (depth * 2)))
+      [[ $score -gt 80 ]] && score=80
+      echo "versioned-api|$score|version-specific-endpoint|api-version-pattern"
+      return
       ;;
   esac
 
@@ -277,11 +281,12 @@ classify() {
   case "$method" in
     POST|PUT|DELETE|PATCH)
       generic_score=$((generic_score + 10))
+      debug_log "Boosting score by 10 for method: $method"
       ;;
   esac
 
   debug_log "Classified as: generic (score: $generic_score, method: $method)"
-  echo "$generic_score|generic|unknown-endpoint"
+  echo "generic|$generic_score|unknown-endpoint|default-classification"
 }
 
 # Validate input file
@@ -291,15 +296,16 @@ if [[ ! -f "$INPUT" ]]; then
 fi
 
 # Initialize output
-echo "score|category|method|endpoint|reason" > "$OUTPUT"
+echo "score|category|method|endpoint|reason|matched_rule" > "$OUTPUT"
 
-# Process endpoints
+# Process endpoints - fixed: subshell pipe issue
+declare -a RESULTS
 line_count=0
 skipped_count=0
 processed_count=0
 
 while IFS= read -r line; do
-  ((line_count++))
+  ((line_count++)) || true  # Fix: prevent exit on ((expr == 0))
   
   # Skip empty lines and comments
   [[ -z "$line" || "$line" =~ ^[[:space:]]*$ ]] && continue
@@ -311,7 +317,7 @@ while IFS= read -r line; do
   
   # Validate endpoint
   if [[ ${#ep} -lt 2 ]]; then
-    ((skipped_count++))
+    ((skipped_count++)) || true
     debug_log "Skipped invalid endpoint: $line"
     continue
   fi
@@ -320,27 +326,31 @@ while IFS= read -r line; do
   category=$(echo "$result" | cut -d'|' -f1)
   score=$(echo "$result" | cut -d'|' -f2)
   reason=$(echo "$result" | cut -d'|' -f3)
+  matched_rule=$(echo "$result" | cut -d'|' -f4)
   
-  echo "$score|$category|$method|$ep|$reason"
-  ((processed_count++))
+  RESULTS+=("$score|$category|$method|$ep|$reason|$matched_rule")
+  ((processed_count++)) || true
   
-done < <(sort -u "$INPUT") | sort -t'|' -nr >> "$OUTPUT"
+done < <(sort -u "$INPUT")
+
+# Sort results and write to file (fixes: subshell counter issue)
+printf '%s\n' "${RESULTS[@]}" | sort -t'|' -nr >> "$OUTPUT"
 
 echo -e "${GREEN}[+] Output written to $OUTPUT${NC}"
 echo -e "${GREEN}[+] Processed: $processed_count, Skipped: $skipped_count, Total lines: $line_count${NC}"
 echo
 
-# Show statistics
+# Show statistics (fixed: NR>1 to skip header)
 echo -e "${YELLOW}[📊 Classification Summary]${NC}"
-awk -F'|' '{category[$2]++; score[$2]+=$1} END {for (cat in category) printf "%s: %d endpoints (avg score: %.1f)\n", cat, category[cat], score[cat]/category[cat]}' "$OUTPUT" | sort
+awk -F'|' 'NR>1 {category[$2]++; score[$2]+=$1} END {for (cat in category) printf "%s: %d endpoints (avg score: %.1f)\n", cat, category[cat], score[cat]/category[cat]}' "$OUTPUT" | sort
 
 echo
 echo -e "${RED}[🔥 Top High-Value Targets (Score >= 80)]${NC}"
-awk -F'|' 'NR>1 && $1 >= 80 {printf "%3d | %-12s | %-6s | %-50s | %s\n", $1, $2, $3, $4, $5}' "$OUTPUT" | head -n 15
+awk -F'|' 'NR>1 && $1 >= 80 {printf "%3d | %-15s | %-6s | %-45s | %s [%s]\n", $1, $2, $3, $4, $5, $6}' "$OUTPUT" | head -n 15
 
 echo
 echo -e "${YELLOW}[⚠️  Medium-Risk Targets (Score 60-79)]${NC}"
-awk -F'|' 'NR>1 && $1 >= 60 && $1 < 80 {printf "%3d | %-12s | %-6s | %-50s | %s\n", $1, $2, $3, $4, $5}' "$OUTPUT" | head -n 10
+awk -F'|' 'NR>1 && $1 >= 60 && $1 < 80 {printf "%3d | %-15s | %-6s | %-45s | %s [%s]\n", $1, $2, $3, $4, $5, $6}' "$OUTPUT" | head -n 10
 
 # Show config info
 if [[ -f "$WHITELIST" ]]; then
