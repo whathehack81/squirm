@@ -5,6 +5,13 @@ set -euo pipefail
 TARGET="${1:-}"
 BASE_DIR="${2:-intel}"
 INPUT="$BASE_DIR/$TARGET/endpoints.txt"
+
+LATEST_RAW_ENDPOINTS="$(find "$BASE_DIR/$TARGET" -type f -path '*/raw/endpoints.txt' -size +0c 2>/dev/null | sort | tail -n 1 || true)"
+
+if [[ ! -f "$INPUT" && -n "$LATEST_RAW_ENDPOINTS" ]]; then
+  INPUT="$LATEST_RAW_ENDPOINTS"
+fi
+
 OUTPUT="$BASE_DIR/$TARGET/brain-output.txt"
 WHITELIST="$BASE_DIR/$TARGET/whitelist.txt"
 BLACKLIST="$BASE_DIR/$TARGET/blacklist.txt"
@@ -162,7 +169,17 @@ classify() {
       ;;
   esac
 
-  ## 3. CRITICAL SURFACES (highest priority)
+  
+  ## 2.5 BLOCKCHAIN EXPLORER NOISE
+  case "$ep_normalized" in
+    */explorer/transactions/*|*/explorer/blocks/*|*/explorer/charts/*)
+      debug_log "Classified as: blockchain explorer reference noise"
+      echo "noise|10|blockchain-explorer-reference|explorer-reference"
+      return
+      ;;
+  esac
+
+## 3. CRITICAL SURFACES (highest priority)
   ## NOTE: Check BEFORE stripping query params to catch SSRF/injection patterns
 
   # SSRF / callbacks / redirects (MUST check on full ep with params)
