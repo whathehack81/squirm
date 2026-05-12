@@ -336,7 +336,9 @@ while IFS= read -r line; do
 done < <(sort -u "$INPUT")
 
 # Sort results and write to file (fixes: subshell counter issue)
-printf '%s\n' "${RESULTS[@]}" | sort -t'|' -k1,1nr >> "$OUTPUT"
+if [[ ${#RESULTS[@]} -gt 0 ]]; then
+  printf '%s\n' "${RESULTS[@]}" | sort -t'|' -k1,1nr >> "$OUTPUT"
+fi
 
 echo -e "${GREEN}[+] Output written to $OUTPUT${NC}"
 echo -e "${GREEN}[+] Processed: $processed_count, Skipped: $skipped_count, Total lines: $line_count${NC}"
